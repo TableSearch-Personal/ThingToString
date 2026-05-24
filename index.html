@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ThingToString</title>
+
+<!--
+    Content Security Policy
+    ─────────────────────────────────────────────────────────────────────
+    • script-src 'self' + the two CDN origins — no inline scripts at all.
+      All event handlers live in init.js (addEventListener), not in HTML.
+    • style-src 'self' 'unsafe-inline' — needed for JS-set .style props
+      (progress bar width, flash banner display, strength label colour).
+    • Everything else locked down: no fetch, no workers, no frames.
+-->
+<meta http-equiv="Content-Security-Policy"
+      content="
+        default-src  'none';
+        script-src   'self' https://cdn.jsdelivr.net 'wasm-unsafe-eval' 'sha256-ZswfTY7H35rbv8WC7NXBoiC7WNu86vSzCDChNWwZZDM=' 'sha256-Ky3+hFJKyNlVCn+2O1i+As0VRJ9PbXyOkmQ+J0AZLoQ=';
+        worker-src   'self' https://cdn.jsdelivr.net blob:;
+        style-src    'self' 'unsafe-inline';
+        connect-src  'self' https://cdn.jsdelivr.net;
+        frame-src    'self' https://cdn.jsdelivr.net;
+        form-action  'none';
+        base-uri     'none';
+      ">
+
+<!--
+    External libraries — pinned versions with real SRI hashes.
+    Hashes taken from the browser's own integrity-check error messages.
+-->
+<script src="https://cdn.jsdelivr.net/npm/argon2-browser@1.18.0/dist/argon2-bundled.min.js"
+        integrity="sha384-XOR3aNvHciLPIf6r+2glkrmbBbLmIJ1EChMXjw8eBKBf8gE0rDq1TyUNuRdorOqi"
+        crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"
+        integrity="sha384-rNlaE5fs9dGIjmxWDALQh/RBAaGRYT5ChrzHo6tRfgrZ36iRFAiquP5g41Jsv+0j"
+        crossorigin="anonymous"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/streamsaver@2.0.6/StreamSaver.js"
+        integrity="sha384-Nqw6SzqA0IaGGLP/g9Y5h/bB8wBGXJ83TDjPs5OgxjX9mYZa5+oUc2Gym4xwZSSa"
+        crossorigin="anonymous"></script>
+
+<link rel="stylesheet" href="css/themes.css">
+<link rel="stylesheet" href="css/layout.css">
+</head>
+<body>
+<div class="app">
+
+<!-- ── Header ──────────────────────────────────────────────────────── -->
+<div class="header">
+    <h1>ThingToString</h1>
+    <span class="ver" id="appVersionLabel"></span>
+    <span class="badge badge-enc badge-header">AES-256-GCM · Argon2id</span>
+    <div class="mode-toggle" id="modeToggle">
+        <div class="mode-opt active" id="modeSimple">Simple</div>
+        <div class="mode-opt" id="modeAdv">Advanced</div>
+    </div>
+    <div class="theme-switcher">
+        <div class="theme-opt active" data-theme-val="dark">Dark</div>
+        <div class="theme-opt"        data-theme-val="darker">Darker</div>
+        <div class="theme-opt"        data-theme-val="contrast">⬛ HC</div>
+    </div>
+</div>
+
+<!-- ── Flash banner ─────────────────────────────────────────────────── -->
+<div id="flashBanner" class="flash-banner info">
+    <span>ℹ</span>
+    <span id="flashMsg"></span>
+    <button id="btnFlashClose" class="flash-close">×</button>
+</div>
+
+<!-- ── Files card ───────────────────────────────────────────────────── -->
+<div class="card">
+    <div class="card-title">Files</div>
+    <div id="dropZone">
+        <span class="dz-icon">📂</span>
+        Drop files here — or click to browse
+        <span class="dz-note">
+            ℹ Folder drag-and-drop is not supported by browsers — use the "Add folder" button instead.
+        </span>
+    </div>
+    <div class="row">
+        <label class="file-btn" for="fileInput">📄 Add files</label>
+        <input type="file" id="fileInput" multiple>
+        <label class="file-btn" for="folderInput">📁 Add folder</label>
+        <input type="file" id="folderInput" multiple webkitdirectory>
+        <button class="btn" id="btnRemoveSelected">Remove selected</button>
+        <button class="btn" id="btnClearQueue">Clear all</button>
+        <span id="queueInfo" class="queue-info"></span>
+    </div>
+    <div class="adv-only row" id="fileOrderRow">
+        <label>File order:</label>
+        <select id="fileOrderSelect">
+            <option value="added">As added</option>
+            <option value="name-asc">Name A→Z</option>
+            <option value="name-desc">Name Z→A</option>
+            <option value="size-asc">Size ↑</option>
+            <option value="size-desc">Size ↓</option>
+            <option value="manual">Manual (drag)</option>
+        </select>
+    </div>
+    <div id="fileList"><div class="empty">No files added</div></div>
+    <div id="sizeLimitBanner"></div>
+</div>
+
+<!-- ── Password card ─────────────────────────────────────────────────── -->
+<div class="card">
+    <div class="card-title">Password</div>
+    <div class="pw-row">
+        <input type="password" id="password" placeholder="Password" autocomplete="new-password">
+        <button class="btn" id="btnShowPassword" title="Show/hide">👁</button>
+        <span id="passwordStrength"></span>
+    </div>
+    <div class="pw-confirm-row">
+        <input type="password" id="passwordConfirm" placeholder="Confirm password" autocomplete="off">
+        <button class="btn" id="btnShowConfirm" title="Show/hide">👁</button>
+        <span id="confirmMatchMsg"></span>
+    </div>
+    <p class="pw-hint">
+        Minimum 8 characters. Enter the password twice to confirm.
+        Same password is used for encrypt and decrypt.
+    </p>
+    <p class="pw-hint" style="margin-top:2px; color: var(--text-dim); font-size:0.8em;">
+        ℹ The confirm field is only checked during encryption.
+    </p>
+
+    <!-- Advanced: Passphrase generator -->
+    <div class="adv-only settings-sub" id="passphraseSection">
+        <div class="expand-toggle" data-expand="passphraseExpand">
+            <em class="expand-caret" id="caretPassphraseExpand">▶</em>
+            Passphrase Generator
+        </div>
+        <div class="expandable-body" id="passphraseExpand">
+            <div class="row pp-gen-row">
+                <label>Words:</label>
+                <input type="number" class="num-sm" id="ppWords" value="8" min="4" max="20">
+                <label>Separator:</label>
+                <select id="ppSep">
+                    <option value="-">Hyphen (-)</option>
+                    <option value="_">Underscore (_)</option>
+                    <option value=".">Dot (.)</option>
+                    <option value=" ">Space</option>
+                </select>
+                <button class="btn" id="btnGeneratePassphrase">Generate</button>
+            </div>
+            <div class="pp-output-row">
+                <div class="passgen-output" id="ppOutput">Click Generate…</div>
+                <button class="btn" id="btnCopyPassphrase" title="Copy">📋</button>
+                <button class="btn btn-primary" id="btnUsePassphrase" title="Use as password">Use ↑</button>
+            </div>
+            <p class="pp-hint">
+                ℹ Using a passphrase sets it in the password field.
+                Confirm it in the <em>Confirm password</em> field above before encrypting.
+            </p>
+        </div>
+    </div>
+
+    <!-- Advanced: Keyfile -->
+    <div class="adv-only settings-sub" id="keyfileSection">
+        <div class="expand-toggle" data-expand="keyfileExpand">
+            <em class="expand-caret" id="caretKeyfileExpand">▶</em>
+            Keyfile
+        </div>
+        <div class="expandable-body" id="keyfileExpand">
+            <div class="warn-box">
+                <strong>⚠ Warning:</strong> A keyfile becomes part of your key material.
+                Losing the keyfile means losing your data.
+                Store it securely and separately from the encrypted files.
+            </div>
+            <div class="chk-row kf-chk-row">
+                <input type="checkbox" id="useKeyfile">
+                <label for="useKeyfile">Combine password with keyfile</label>
+            </div>
+            <div id="keyfilePickRow" class="kf-pick-row">
+                <div class="row">
+                    <label class="file-btn" for="keyfileInput">📎 Select keyfile</label>
+                    <input type="file" id="keyfileInput">
+                    <button class="btn btn-danger btn-sm" id="btnClearKeyfile">✕ Clear</button>
+                </div>
+                <div class="keyfile-name" id="keyfileName">No keyfile selected</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Encryption Settings card ──────────────────────────────────────── -->
+<div class="card">
+    <div class="card-title">Encryption Settings</div>
+
+    <div class="row">
+        <label>Output name:</label>
+        <select id="nameMode">
+            <option value="preserve">Original name</option>
+            <option value="custom">Custom name</option>
+            <option value="hidden">Hidden (generic)</option>
+            <option value="encrypted">Random UUID</option>
+        </select>
+        <input type="text" id="customName" placeholder="custom_name" class="custom-name-input">
+    </div>
+
+    <div class="row">
+        <label>Compression:</label>
+        <select id="compressionMode">
+            <option value="standard">Standard (zlib level 6)</option>
+            <option value="aggressive">Aggressive (raw deflate level 9)</option>
+            <option value="none">None (no compression)</option>
+        </select>
+    </div>
+
+    <div class="row">
+        <label>Chunk size:</label>
+        <select id="chunkSizeSelect">
+            <option value="1048576">1 MB</option>
+            <option value="4194304" selected>4 MB</option>
+            <option value="16777216">16 MB</option>
+            <option value="67108864">64 MB</option>
+        </select>
+    </div>
+
+    <hr class="sep">
+    <div class="chk-row">
+        <input type="checkbox" id="keepMeta" checked>
+        <label for="keepMeta">Include metadata
+            <span class="label-dim">(filename, type, timestamp)</span>
+        </label>
+    </div>
+    <div class="chk-row chk-indent">
+        <input type="checkbox" id="encryptMeta" checked>
+        <label for="encryptMeta">Encrypt metadata
+            <span class="badge badge-enc">recommended</span>
+        </label>
+    </div>
+    <div class="chk-note" id="metaEncNote">
+        Metadata is encrypted alongside the payload.
+        Only compression mode is stored in plaintext in the authenticated header.
+    </div>
+
+    <div class="apply-row simple-reset-row">
+        <button class="btn btn-warn btn-sm" id="btnResetSimpleDefaults">↩ Reset to defaults</button>
+        <span class="label-dim" style="font-size:0.82em">Resets all Simple settings above to their defaults</span>
+    </div>
+
+    <!-- Advanced: Argon2 -->
+    <div class="adv-only settings-sub">
+        <div class="expand-toggle" data-expand="argon2Expand">
+            <em class="expand-caret" id="caretArgon2Expand">▶</em>
+            Argon2id Parameters <span class="adv-badge">Advanced</span>
+        </div>
+        <div class="expandable-body" id="argon2Expand">
+            <div class="warn-box">
+                <strong>⚠</strong> These parameters are stored in the file header.
+                To decrypt, you must use the same or compatible settings.
+            </div>
+            <div class="row argon2-top-row">
+                <label title="Memory used for key derivation">Memory (KB):</label>
+                <input type="number" class="num-md" id="argon2Mem" value="131072" min="8192" max="1048576" step="8192">
+                <span class="label-sm" id="argon2MemMB"></span>
+            </div>
+            <div class="row">
+                <label title="Number of passes over memory">Time cost:</label>
+                <input type="number" class="num-sm" id="argon2Time" value="4" min="1" max="64">
+            </div>
+            <div class="row">
+                <label title="Degree of parallelism">Parallelism:</label>
+                <input type="number" class="num-sm" id="argon2Parallel" value="2" min="1" max="8">
+                <span class="label-sm">detected: <span id="hwConcurrency"></span> thread(s)</span>
+            </div>
+            <div class="row argon2-btn-row">
+                <button class="btn" id="btnResetArgon2">Reset defaults</button>
+                <button class="btn btn-warn" id="btnBenchmark">⏱ Benchmark</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced: Salt & Nonce -->
+    <div class="adv-only settings-sub">
+        <div class="expand-toggle" data-expand="saltNonceExpand">
+            <em class="expand-caret" id="caretSaltNonceExpand">▶</em>
+            Salt &amp; Nonce <span class="adv-badge">Advanced</span>
+        </div>
+        <div class="expandable-body" id="saltNonceExpand">
+            <div class="warn-box">
+                <strong>⚠ Security warning:</strong> Manual salt/nonce input is dangerous.
+                Reusing a nonce with the same key exposes your plaintext.
+            </div>
+            <div class="chk-row kf-chk-row">
+                <input type="checkbox" id="deterministicMode">
+                <label for="deterministicMode">Deterministic mode
+                    <span class="label-dim">(reproducible output — same salt/nonce each run)</span>
+                </label>
+            </div>
+            <div class="chk-note">
+                <strong>Only use for testing where nonce reuse is acceptable.</strong>
+            </div>
+            <div id="manualSaltRow" class="salt-row">
+                <div class="row"><label>Salt (hex, 32 chars / 16 bytes):</label></div>
+                <div class="row">
+                    <input type="text" id="manualSalt" placeholder="auto-generated" class="salt-input" maxlength="32">
+                    <button class="btn" id="btnGenSalt">🎲 Random</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced: AAD -->
+    <div class="adv-only settings-sub">
+        <div class="expand-toggle" data-expand="aadExpand">
+            <em class="expand-caret" id="caretAadExpand">▶</em>
+            Additional Authenticated Data (AAD) <span class="adv-badge">Advanced</span>
+        </div>
+        <div class="expandable-body" id="aadExpand">
+            <p class="aad-desc">
+                Extra context string bound to the encryption. Must be re-entered exactly when decrypting.
+                It is <em>not</em> stored in the file.
+            </p>
+            <div class="chk-row">
+                <input type="checkbox" id="useAAD">
+                <label for="useAAD">Enable custom AAD string</label>
+            </div>
+            <div id="aadInputRow" class="aad-input-row">
+                <input type="text" id="aadString" placeholder="e.g. project-alpha, user@example.com" class="aad-input-full">
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced: Output format -->
+    <div class="adv-only settings-sub">
+        <div class="expand-toggle" data-expand="outputFmtExpand">
+            <em class="expand-caret" id="caretOutputFmtExpand">▶</em>
+            Output Format &amp; Checksum <span class="adv-badge">Advanced</span>
+        </div>
+        <div class="expandable-body" id="outputFmtExpand">
+            <div class="row">
+                <label>Container:</label>
+                <select id="containerFormat">
+                    <option value="binary">Binary (.tsf) — compact</option>
+                    <option value="base64">Base64 text (.tsf.b64) — portable</option>
+                </select>
+            </div>
+            <div class="chk-row">
+                <input type="checkbox" id="genChecksum">
+                <label for="genChecksum">Generate SHA-256 checksum sidecar (.sha256)</label>
+            </div>
+            <div class="chk-row">
+                <input type="checkbox" id="lineEndingNorm">
+                <label for="lineEndingNorm">Normalize line endings to LF before encrypting text files</label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced: Performance -->
+    <div class="adv-only settings-sub">
+        <div class="expand-toggle" data-expand="perfExpand">
+            <em class="expand-caret" id="caretPerfExpand">▶</em>
+            Processing &amp; Performance <span class="adv-badge">Advanced</span>
+        </div>
+        <div class="expandable-body" id="perfExpand">
+            <div class="row">
+                <label>Processing mode:</label>
+                <select id="processingMode">
+                    <option value="streaming">Streaming (low RAM)</option>
+                    <option value="fullbuffer">Full buffer (higher RAM, faster small files)</option>
+                </select>
+            </div>
+            <div class="row">
+                <label>Memory limit (MB):</label>
+                <input type="number" class="num-sm" id="memLimitMB" value="512" min="64" max="4096" step="64">
+                <span class="perf-hint">advisory — saved to config only</span>
+            </div>
+            <div class="row">
+                <label>Max threads:</label>
+                <input type="number" class="num-sm" id="maxThreads" value="4" min="1" max="16">
+                <span class="perf-hint">advisory — use Argon2 parallelism to control KDF threads</span>
+            </div>
+            <div class="row">
+                <label>Batch mode:</label>
+                <select id="batchMode">
+                    <option value="sequential">Sequential (one at a time)</option>
+                    <option value="fail-fast">Fail fast (stop on first error)</option>
+                    <option value="continue">Continue on error</option>
+                </select>
+            </div>
+            <div class="chk-row chk-row-spaced">
+                <input type="checkbox" id="useStreamSaver" checked>
+                <label for="useStreamSaver">Use StreamSaver for large-file streaming downloads
+                    <span class="label-dim">(recommended)</span>
+                </label>
+            </div>
+            <div class="chk-note">
+                StreamSaver enables true chunk-by-chunk streaming to disk in browsers that lack
+                the File System Access API (Firefox, older Safari). Without it, the entire
+                encrypted output is buffered in RAM before download, which can crash the tab
+                for large files. StreamSaver works via a small service worker from
+                <em>cdn.jsdelivr.net</em> — disable this if your CSP or privacy policy
+                prohibits third-party service workers.
+            </div>
+        </div>
+    </div>
+
+    <!-- Advanced: Safety -->
+    <div class="adv-only settings-sub">
+        <div class="expand-toggle" data-expand="safetyExpand">
+            <em class="expand-caret" id="caretSafetyExpand">▶</em>
+            Safety &amp; Verification <span class="adv-badge">Advanced</span>
+        </div>
+        <div class="expandable-body" id="safetyExpand">
+
+            <p class="safety-group-label">Output safety</p>
+            <div class="chk-row">
+                <input type="checkbox" id="autoVerify">
+                <label for="autoVerify">Auto test-decrypt after each encrypt
+                    <span class="label-dim">(true round-trip verify)</span>
+                </label>
+            </div>
+            <div class="chk-note">After encrypting, re-parses the written output from scratch, re-derives the key from the header's salt, reconstructs the AAD, and decrypts a sample of chunks (first, last, and one middle chunk). Also spot-checks the decrypted plaintext against the original file. Catches header layout bugs, AAD construction errors, IV derivation regressions, and compression mismatches — not just wrong passwords. Adds one Argon2 derivation of overhead per file.</div>
+            <div class="chk-row chk-row-spaced">
+                <input type="checkbox" id="dryRunMode">
+                <label for="dryRunMode">Dry-run mode
+                    <span class="label-dim">(run fully without writing output)</span>
+                </label>
+            </div>
+            <div class="chk-note">Processes files normally but skips the final write. Useful for timing or testing settings without producing output.</div>
+
+            <p class="safety-group-label safety-group-label-spaced">Logging</p>
+            <div class="chk-row">
+                <input type="checkbox" id="verboseLog">
+                <label for="verboseLog">Verbose log
+                    <span class="label-dim">(extra detail per file)</span>
+                </label>
+            </div>
+            <div class="chk-note">Logs metadata warnings, compression decisions, and other per-file detail that is normally suppressed.</div>
+            <div class="chk-row chk-row-spaced">
+                <input type="checkbox" id="diagLog">
+                <label for="diagLog">Chunk diagnostic log
+                    <span class="label-dim">(per-chunk size &amp; timing)</span>
+                </label>
+            </div>
+            <div class="chk-note">Logs every chunk: raw size → ciphertext size and ms taken. Useful for diagnosing throughput issues or verifying compression ratios. Off by default — produces a lot of output for large files.</div>
+        </div>
+    </div>
+
+    <hr class="sep">
+    <div class="card-title decrypt-title">Decryption Options</div>
+
+    <div class="row">
+        <label>Output name override:</label>
+        <input type="text" id="decryptNameOverride" class="decrypt-name-input"
+               placeholder="Leave blank to use stored name">
+    </div>
+    <p class="decrypt-hint">
+        Overrides the filename from metadata. Useful when metadata is absent or hidden.
+    </p>
+    <div class="chk-row">
+        <input type="checkbox" id="previewMeta">
+        <label for="previewMeta">Show metadata preview before decrypting</label>
+    </div>
+
+    <!-- Advanced: Config profiles -->
+    <div class="adv-only settings-sub">
+        <div class="expand-toggle" data-expand="profileExpand">
+            <em class="expand-caret" id="caretProfileExpand">▶</em>
+            Configuration Profiles &amp; CLI Export <span class="adv-badge">Advanced</span>
+        </div>
+        <div class="expandable-body" id="profileExpand">
+            <div class="row">
+                <button class="btn" id="btnExportConfig">📤 Export config (JSON)</button>
+                <label class="file-btn" for="importConfigInput">📥 Import config</label>
+                <input type="file" id="importConfigInput" accept=".json">
+            </div>
+            <div class="row profile-btn-row">
+                <button class="btn" id="btnShowCLI">💻 CLI-compatible view</button>
+            </div>
+            <div class="config-preview config-preview-hidden" id="configPreview"></div>
+        </div>
+    </div>
+
+    <div class="apply-row">
+        <button class="btn btn-primary" id="btnApplySettings">Apply settings</button>
+        <button class="btn btn-warn adv-only" id="btnResetAdvancedDefaults">↩ Reset Advanced defaults</button>
+    </div>
+</div>
+
+<!-- ── Actions card ──────────────────────────────────────────────────── -->
+<div class="card">
+    <div class="card-title">Actions</div>
+    <div class="row">
+        <button class="btn btn-primary" id="btnEncrypt">🔒 Encrypt</button>
+        <button class="btn btn-primary" id="btnDecrypt">🔓 Decrypt</button>
+        <button class="btn btn-danger"  id="cancelBtn" disabled>⛔ Cancel</button>
+    </div>
+    <div class="progress-wrap">
+        <div class="progressBar"><div class="progressFill" id="progressFill"></div></div>
+        <div id="progressLabel"></div>
+    </div>
+</div>
+
+<!-- ── Log card ──────────────────────────────────────────────────────── -->
+<div class="card">
+    <div class="log-header">
+        <div class="card-title">Log</div>
+        <button class="log-clear-btn" id="btnExportLog">⬇ export</button>
+        <button class="log-clear-btn" id="btnClearLog">✕ clear</button>
+    </div>
+    <div id="log" class="log"></div>
+</div>
+
+</div><!-- /app -->
+
+<!-- ── Metadata preview modal ─────────────────────────────────────────── -->
+<div id="metaModal">
+    <div class="modal-box">
+        <h3>📋 Metadata preview</h3>
+        <table class="meta-table" id="metaTable"></table>
+        <div class="modal-actions">
+            <button class="btn" id="btnMetaCancel">Cancel</button>
+            <button class="btn btn-primary" id="btnMetaProceed">Proceed</button>
+        </div>
+    </div>
+</div>
+
+<!--
+    JS load order (each file depends on those before it):
+      1. constants.js  — APP_VERSION, limits, shared state, TSFError
+      2. ui.js         — log, flash, theme, modal
+      3. password.js   — strength, passphrase generator, keyfile
+      4. queue.js      — file list, drag-reorder, drop-zone wiring
+      5. settings.js   — settings panel, config export/import
+      6. crypto.js     — key derivation, byte utils, compression helpers
+      7. encrypt.js    — V17 encrypt
+      8. decrypt.js    — V17/V15/V14/V13 decrypt dispatcher
+     8b. verify.js     — True round-trip verification (used by encrypt.js autoVerify)
+      9. processor.js  — batch queue runner, cancel
+     10. init.js       — wires ALL event listeners, runs startup
+-->
+<script src="js/constants.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/password.js"></script>
+<script src="js/queue.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/crypto.js"></script>
+<script src="js/encrypt.js"></script>
+<script src="js/decrypt.js"></script>
+<script src="js/verify.js"></script>
+<script src="js/processor.js"></script>
+<script src="js/init.js"></script>
+<script>
+// Warn immediately if the page is not in a secure context, since
+// StreamSaver's service worker fetch interception requires https:// or localhost.
+if (!window.isSecureContext) {
+    document.addEventListener("DOMContentLoaded", function() {
+        const banner = document.getElementById("flashBanner");
+        const msg    = document.getElementById("flashMsg");
+        if (banner && msg) {
+            msg.textContent =
+                "⚠ Not a secure context (http:// on non-localhost). " +
+                "Large-file streaming requires https:// or http://localhost. " +
+                "Small files will still work via RAM buffering.";
+            banner.className = "flash-banner warn";
+            banner.style.display = "flex";
+        }
+    });
+}
+</script>
+</body>
+</html>
